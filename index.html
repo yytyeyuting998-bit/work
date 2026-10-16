@@ -3,7 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智能机构多校区课程表与排班系统</title>
+    <title>智能机构多校区课程表与排班系统 (云端修复版)</title>
+    <!-- 引入 Supabase JS SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; background: #f4f6f9; padding: 20px; color: #333; }
@@ -43,6 +45,8 @@
         .btn-reset { background: #ef4444; color: #fff; }
         .btn-view { background: #8b5cf6; color: #fff; }
 
+        .sync-status { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #dcfce7; color: #15803d; border: 1px solid #86efac; }
+
         /* 月份与视图切换栏 */
         .view-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px dashed #e2e8f0; padding-bottom: 8px; }
         .month-picker { display: flex; gap: 4px; overflow-x: auto; }
@@ -76,10 +80,8 @@
         .rest-tag-btn.is-rest { background: #f59e0b; color: #fff; }
         .rest-tag-btn.not-rest { background: #f1f5f9; color: #94a3b8; border: 1px dashed #cbd5e1; }
 
-        /* 课程卡片与试听课状态 */
+        /* 课程卡片与冲突警示 */
         .course-card { margin-bottom: 5px; padding: 6px 8px; border-radius: 6px; font-size: 11px; line-height: 1.35; position: relative; color: #fff; cursor: pointer; z-index: 2; border: 2px solid transparent; transition: all 0.2s; }
-        
-        /* 🚨 冲突课程高亮样式：闪烁粗红框 + 阴影 */
         .course-card.has-conflict {
             border: 2px solid #ef4444 !important;
             box-shadow: 0 0 8px rgba(239, 68, 68, 0.8) !important;
@@ -91,16 +93,7 @@
         }
 
         .conflict-badge {
-            display: block;
-            background: #ef4444;
-            color: #fff;
-            font-size: 10px;
-            font-weight: bold;
-            padding: 2px 4px;
-            border-radius: 3px;
-            margin-top: 3px;
-            text-align: center;
-            letter-spacing: 0.5px;
+            display: block; background: #ef4444; color: #fff; font-size: 10px; font-weight: bold; padding: 2px 4px; border-radius: 3px; margin-top: 3px; text-align: center;
         }
 
         .course-card .card-actions { position: absolute; right: 4px; top: 4px; display: none; gap: 2px; }
@@ -174,6 +167,7 @@
         <div class="title">
             📅 <span id="calendarTitle">课程表</span>
             <span id="currentUserBadge" style="font-size:12px; background:#eff6ff; color:#2563eb; padding:2px 8px; border-radius:12px; border:1px solid #bfdbfe;"></span>
+            <span class="sync-status" id="syncStatus">☁️ 云端已同步</span>
         </div>
         <div class="toolbar">
             <select id="yearSelect" onchange="changeYear(this.value)"></select>
@@ -194,6 +188,7 @@
             <button class="btn btn-backup admin-only" onclick="triggerImport()">📤 导入</button>
             <input type="file" id="importInput" accept=".json" style="display:none;" onchange="importData(event)">
             <button class="btn btn-print" onclick="window.print()">🖨️ 彩色PDF</button>
+            <button class="btn btn-reset admin-only" onclick="clearAllData()">🗑️ 清空所有</button>
             <button class="btn btn-reset" onclick="handleLogout()">🚪 退出</button>
         </div>
     </div>
@@ -207,7 +202,7 @@
     </div>
 
     <div class="summary-card">
-        <div class="summary-title">📊 <span id="summaryMonthText">8月</span> 统计概览 (<span id="summaryCampusText">世纪海航校区</span>)</div>
+        <div class="summary-title">📊 <span id="summaryMonthText">10月</span> 统计概览 (<span id="summaryCampusText">世纪海航校区</span>)</div>
         <div class="summary-row" id="summaryRowCourses"></div>
         <div class="summary-row" id="summaryRowFinancial"></div>
     </div>
@@ -371,14 +366,32 @@
 </div>
 
 <script>
-// ==================== 🔐 用户与权限管理 ====================
+// ==================== ☁️ Supabase 云端连接初始化 ====================
+const SUPABASE_URL = "https://udpoijajagmfjcxbxxnb.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_b9QDeaQHtBho6uWcgT1djg_wTglxi8F";
+const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 const ADMIN_USER = "叶钰婷";
 const ADMIN_PASS = "117955yyt";
 
-let users = JSON.parse(localStorage.getItem("system_users")) || [
-    { username: ADMIN_USER, password: ADMIN_PASS, teacherName: "叶钰婷", status: "approved", role: "admin" }
-];
+let users = [];
 let currentUser = JSON.parse(localStorage.getItem("system_current_user")) || null;
+
+async function loadUsersFromCloud() {
+    try {
+        const { data, error } = await supabaseClient.from('system_users').select('*');
+        if (error || !data || data.length === 0) {
+            const initUser = { username: ADMIN_USER, password: ADMIN_PASS, teacherName: "叶钰婷", status: "approved", role: "admin" };
+            await supabaseClient.from('system_users').insert([initUser]);
+            users = [initUser];
+        } else {
+            users = data;
+        }
+    } catch (e) {
+        users = [{ username: ADMIN_USER, password: ADMIN_PASS, teacherName: "叶钰婷", status: "approved", role: "admin" }];
+    }
+    updatePendingCount();
+}
 
 function switchAuthTab(tab) {
     document.getElementById("tabLogin").classList.toggle("active", tab === 'login');
@@ -391,11 +404,12 @@ function switchAuthTab(tab) {
     teacherList.forEach(t => regSelect.innerHTML += `<option value="${t}">${t}</option>`);
 }
 
-function handleLogin() {
+async function handleLogin() {
     const u = document.getElementById("loginUser").value.trim();
     const p = document.getElementById("loginPass").value.trim();
     if (!u || !p) return alert("请输入账号和密码！");
 
+    await loadUsersFromCloud();
     const found = users.find(user => user.username === u && user.password === p);
     if (!found) return alert("账号或密码错误！");
     if (found.status !== "approved") return alert("您的账号正等待管理员叶钰婷审核！");
@@ -405,17 +419,23 @@ function handleLogin() {
     checkAuthUI();
 }
 
-function handleRegister() {
+async function handleRegister() {
     const u = document.getElementById("regUser").value.trim();
     const t = document.getElementById("regTeacherBind").value;
     const p = document.getElementById("regPass").value.trim();
     if (!u || !p) return alert("请填写完整！");
+
+    await loadUsersFromCloud();
     if (users.find(user => user.username === u)) return alert("该账号已被注册！");
 
-    users.push({ username: u, password: p, teacherName: t, status: "pending", role: "user" });
-    localStorage.setItem("system_users", JSON.stringify(users));
-    alert("注册提交成功！请联系管理员叶钰婷审核通过后登录。");
-    switchAuthTab("login");
+    const newUser = { username: u, password: p, teacherName: t, status: "pending", role: "user" };
+    const { error } = await supabaseClient.from('system_users').insert([newUser]);
+    if (error) {
+        alert("注册上传失败，请重试！");
+    } else {
+        alert("注册提交成功！跨设备审核已发送给管理员叶钰婷，审核通过后即可登录。");
+        switchAuthTab("login");
+    }
 }
 
 function handleLogout() {
@@ -441,37 +461,45 @@ function checkAuthUI() {
         document.getElementById("campusSelect").disabled = false;
     }
 
-    updatePendingCount();
-    updateSelectDropdowns();
-    renderCalendar();
+    loadDataFromCloud();
 }
 
 function updatePendingCount() {
     document.getElementById("pendingCount").innerText = users.filter(u => u.status === "pending").length;
 }
 
-function openUserAdminModal() {
+async function openUserAdminModal() {
+    await loadUsersFromCloud();
     const container = document.getElementById("userAdminList"); container.innerHTML = "";
-    users.forEach((u, index) => {
+    users.forEach((u) => {
         if (u.username === ADMIN_USER) return;
         const row = document.createElement("div"); row.className = "config-list-item";
         row.innerHTML = `
             <div><b>${u.username}</b> (绑定老师: ${u.teacherName}) <span style="font-size:10px; padding:1px 6px; border-radius:10px; background:${u.status === 'approved' ? '#dcfce7;color:#15803d;' : '#fef3c7;color:#b45309;'}">${u.status === 'approved' ? '已通过' : '待审核'}</span></div>
             <div>
-                ${u.status === 'pending' ? `<button class="btn btn-primary" style="padding:2px 8px;font-size:10px;" onclick="approveUser(${index})">通过</button>` : ''}
-                <button class="card-btn" style="background:#ef4444;width:22px;height:22px;display:inline-block;" onclick="deleteUser(${index})">🗑️</button>
+                ${u.status === 'pending' ? `<button class="btn btn-primary" style="padding:2px 8px;font-size:10px;" onclick="approveUser('${u.username}')">通过</button>` : ''}
+                <button class="card-btn" style="background:#ef4444;width:22px;height:22px;display:inline-block;" onclick="deleteUser('${u.username}')">🗑️</button>
             </div>
         `;
         container.appendChild(row);
     });
     document.getElementById("userAdminModal").style.display = "flex";
 }
-function approveUser(index) { users[index].status = "approved"; localStorage.setItem("system_users", JSON.stringify(users)); updatePendingCount(); openUserAdminModal(); }
-function deleteUser(index) { if (confirm("确定删除吗？")) { users.splice(index, 1); localStorage.setItem("system_users", JSON.stringify(users)); updatePendingCount(); openUserAdminModal(); } }
+
+async function approveUser(username) {
+    await supabaseClient.from('system_users').update({ status: "approved" }).eq('username', username);
+    openUserAdminModal();
+}
+async function deleteUser(username) {
+    if (confirm("确定删除吗？")) {
+        await supabaseClient.from('system_users').delete().eq('username', username);
+        openUserAdminModal();
+    }
+}
 
 // ==================== 基础数据与配置 ====================
 let currentYear = parseInt(localStorage.getItem("currentYear")) || 2026;
-let currentMonth = parseInt(localStorage.getItem("currentMonth")) || 8;
+let currentMonth = parseInt(localStorage.getItem("currentMonth")) || 10;
 let currentCampus = localStorage.getItem("currentCampus") || "世纪海航校区";
 let currentTeacherFilter = "ALL";
 let currentViewMode = "month";
@@ -483,53 +511,78 @@ const defaultTimeSlots = ["09:00-12:00", "10:00-12:00", "14:00-16:00", "14:30-16
 const defaultCampuses = ["世纪海航校区"];
 const defaultColors = { "科创1V4": "#d97706", "司武AI": "#2563eb", "试听课 - C++": "#4b5563", "试听课 - 科创": "#6b7280", "试听课 - 科特": "#374151" };
 
-let teacherList = JSON.parse(localStorage.getItem("teacherList")) || defaultTeachers;
-if (!teacherList.includes("叶钰婷")) teacherList.unshift("叶钰婷");
+let teacherList = defaultTeachers;
+let classList = defaultClasses;
+let locationList = defaultLocations;
+let timeSlotList = defaultTimeSlots;
+let campuses = defaultCampuses;
 
-let classList = JSON.parse(localStorage.getItem("classList")) || defaultClasses;
-let locationList = JSON.parse(localStorage.getItem("locationList")) || defaultLocations;
-let timeSlotList = JSON.parse(localStorage.getItem("timeSlotList")) || defaultTimeSlots;
-let campuses = JSON.parse(localStorage.getItem("campuses")) || defaultCampuses;
-
-let coursesData = JSON.parse(localStorage.getItem("coursesData")) || {};
-let eventsData = JSON.parse(localStorage.getItem("eventsData")) || {};
-let courseColors = JSON.parse(localStorage.getItem("courseColors")) || defaultColors;
-let restDays = JSON.parse(localStorage.getItem("restDays")) || {};
-
-// 将所有已知课程批量同步分配为叶钰婷老师
-(function syncAllCoursesToYeYuting() {
-    let updated = false;
-    for (let d in coursesData) {
-        if (Array.isArray(coursesData[d])) {
-            coursesData[d].forEach(c => {
-                if (c.teacher !== "叶钰婷") {
-                    c.teacher = "叶钰婷";
-                    updated = true;
-                }
-            });
-        }
-    }
-    if (updated) {
-        localStorage.setItem("coursesData", JSON.stringify(coursesData));
-    }
-})();
+let coursesData = {};
+let eventsData = {};
+let courseColors = defaultColors;
+let restDays = {};
 
 let selectedBatchDays = [];
 let selectedRestDays = [];
 
-function saveData() {
-    localStorage.setItem("currentYear", currentYear);
-    localStorage.setItem("currentMonth", currentMonth);
-    localStorage.setItem("currentCampus", currentCampus);
-    localStorage.setItem("teacherList", JSON.stringify(teacherList));
-    localStorage.setItem("classList", JSON.stringify(classList));
-    localStorage.setItem("locationList", JSON.stringify(locationList));
-    localStorage.setItem("timeSlotList", JSON.stringify(timeSlotList));
-    localStorage.setItem("campuses", JSON.stringify(campuses));
+// ☁️ 从云端同步数据
+async function loadDataFromCloud() {
+    document.getElementById("syncStatus").innerText = "🔄 云端同步中...";
+    try {
+        const { data, error } = await supabaseClient.from('courses_data').select('*').eq('id', 'main_config').single();
+        if (data && data.payload) {
+            const p = data.payload;
+            coursesData = p.coursesData || {};
+            eventsData = p.eventsData || {};
+            restDays = p.restDays || {};
+            teacherList = p.teacherList || defaultTeachers;
+            classList = p.classList || defaultClasses;
+            locationList = p.locationList || defaultLocations;
+            timeSlotList = p.timeSlotList || defaultTimeSlots;
+            campuses = p.campuses || defaultCampuses;
+            courseColors = p.courseColors || defaultColors;
+        } else {
+            coursesData = JSON.parse(localStorage.getItem("coursesData")) || {};
+            eventsData = JSON.parse(localStorage.getItem("eventsData")) || {};
+            restDays = JSON.parse(localStorage.getItem("restDays")) || {};
+            await saveDataToCloud();
+        }
+        document.getElementById("syncStatus").innerText = "☁️ 实时同步完成";
+    } catch (e) {
+        document.getElementById("syncStatus").innerText = "⚠️ 离线模式";
+    }
+    updateSelectDropdowns();
+    renderCalendar();
+}
+
+// ☁️ 保存数据至云端
+async function saveDataToCloud() {
+    document.getElementById("syncStatus").innerText = "🔄 云端保存中...";
+    const payload = { coursesData, eventsData, restDays, teacherList, classList, locationList, timeSlotList, campuses, courseColors };
+    
     localStorage.setItem("coursesData", JSON.stringify(coursesData));
     localStorage.setItem("eventsData", JSON.stringify(eventsData));
-    localStorage.setItem("courseColors", JSON.stringify(courseColors));
-    localStorage.setItem("restDays", JSON.stringify(restDays));
+
+    try {
+        await supabaseClient.from('courses_data').upsert({ id: 'main_config', payload: payload });
+        document.getElementById("syncStatus").innerText = "☁️ 实时同步完成";
+    } catch (e) {
+        document.getElementById("syncStatus").innerText = "⚠️ 云端更新失败";
+    }
+}
+
+// 清空所有云端数据
+async function clearAllData() {
+    if (confirm("⚠️ 确定要清空云端和本地的所有排课数据吗？此操作不可撤销！")) {
+        coursesData = {};
+        eventsData = {};
+        restDays = {};
+        localStorage.removeItem("coursesData");
+        localStorage.removeItem("eventsData");
+        await saveDataToCloud();
+        renderCalendar();
+        alert("🎉 所有数据已成功清空！");
+    }
 }
 
 function updateSelectDropdowns() {
@@ -590,7 +643,7 @@ function toggleStudentField(type) {
     }
 }
 
-// ==================== 🚨 严谨校验与冲突识别算法 ====================
+// ==================== 🚨 严谨冲突判定算法 (Bug 彻底修复版) ====================
 function parseMinutes(timeStr) {
     if (!timeStr) return { start: 0, end: 0 };
     let match = timeStr.match(/(\d{1,2})[:：](\d{2})[\-~至到](\d{1,2})[:：](\d{2})/);
@@ -599,28 +652,41 @@ function parseMinutes(timeStr) {
     return { start: h1 * 60 + m1, end: h2 * 60 + m2 };
 }
 
-// 获得某天所有相互冲突的课程 ID 列表
+// 严谨计算某一天是否存在真实的相互冲突课程（至少需要 2 节不同课程重叠）
 function getConflictCourseIdsOnDay(dateStr) {
-    const coursesOnDay = coursesData[dateStr] || [];
+    const rawList = coursesData[dateStr] || [];
+    // 去重处理
+    const coursesOnDay = [];
+    const seenIds = new Set();
+    rawList.forEach(c => {
+        if (c && c.id && !seenIds.has(c.id)) {
+            seenIds.add(c.id);
+            coursesOnDay.push(c);
+        }
+    });
+
     const conflictIds = new Set();
+    if (coursesOnDay.length <= 1) return conflictIds; // 1 节课绝对不会冲突
 
     for (let i = 0; i < coursesOnDay.length; i++) {
         for (let j = i + 1; j < coursesOnDay.length; j++) {
             const c1 = coursesOnDay[i];
             const c2 = coursesOnDay[j];
 
+            if (c1.id === c2.id) continue; // 忽略同一节课
+
             const r1 = parseMinutes(c1.time);
             const r2 = parseMinutes(c2.time);
 
-            // 时间交集
+            // 判断时间是否有重叠交集
             if (r1.start < r2.end && r2.start < r1.end) {
-                // 1. 同老师冲突
-                if (c1.teacher && c1.teacher === c2.teacher) {
+                // 1. 同教师冲突
+                if (c1.teacher && c2.teacher && c1.teacher === c2.teacher) {
                     conflictIds.add(c1.id);
                     conflictIds.add(c2.id);
                 }
                 // 2. 同教室/场地冲突
-                if (c1.campus === c2.campus && c1.loc && c1.loc === c2.loc) {
+                if (c1.campus === c2.campus && c1.loc && c2.loc && c1.loc === c2.loc) {
                     conflictIds.add(c1.id);
                     conflictIds.add(c2.id);
                 }
@@ -650,8 +716,8 @@ function checkConflict(dateStr, timeStr, teacher, loc, campus, excludeCourseId =
     return null;
 }
 
-// ==================== 📅 批量排课与保存 ====================
-function saveCourse() {
+// ==================== 📅 排课保存与云端同步 ====================
+async function saveCourse() {
     const dateStr = document.getElementById("fieldDate").value;
     const teacher = document.getElementById("fieldTeacher").value;
     const campus = document.getElementById("fieldCourseCampus").value;
@@ -669,10 +735,6 @@ function saveCourse() {
     const conflictMsg = checkConflict(dateStr, time, teacher, loc, campus, editId);
     if (conflictMsg && !confirm(`${conflictMsg}\n强制排课后日历卡片将高亮标红红框警示，是否依然保存？`)) return;
 
-    if (isTrial && checkTrialStudentExists(studentName, name, editId)) {
-        if (!confirm(`提示：学员【${studentName}】本月已有试听课记录，是否继续添加？`)) return;
-    }
-
     getOrAssignColor(name);
     if (!coursesData[dateStr]) coursesData[dateStr] = [];
 
@@ -689,21 +751,12 @@ function saveCourse() {
         coursesData[dateStr].push(courseObj);
     }
 
-    saveData(); closeModal("courseModal"); renderCalendar();
+    closeModal("courseModal");
+    await saveDataToCloud();
+    renderCalendar();
 }
 
-function checkTrialStudentExists(studentName, courseName, excludeId) {
-    const totalDays = new Date(currentYear, currentMonth, 0).getDate();
-    for (let d = 1; d <= totalDays; d++) {
-        const dateStr = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-        for (let c of (coursesData[dateStr] || [])) {
-            if (c.id !== excludeId && c.studentName === studentName) return true;
-        }
-    }
-    return false;
-}
-
-function saveBatchCourses() {
+async function saveBatchCourses() {
     if (selectedBatchDays.length === 0) return alert("请在日历中勾选上课日期！");
 
     const teacher = document.getElementById("fieldBatchTeacher").value;
@@ -734,11 +787,13 @@ function saveBatchCourses() {
         });
     });
 
-    saveData(); closeModal("batchCourseModal"); renderCalendar();
-    if (conflictCount > 0) alert(`⚠️ 批量排课已保存！其中有 ${conflictCount} 天课程存在时间/场地重叠，系统已为您在日历上【红框高亮显示】，请注意核查！`);
+    closeModal("batchCourseModal");
+    await saveDataToCloud();
+    renderCalendar();
+    if (conflictCount > 0) alert(`⚠️ 批量排课已同步至云端！其中有 ${conflictCount} 天课程存在时间重叠，已呈【红框高亮显示】！`);
 }
 
-function duplicateToNextWeek(dateStr, courseId) {
+async function duplicateToNextWeek(dateStr, courseId) {
     const course = (coursesData[dateStr] || []).find(c => c.id === courseId);
     if (!course) return;
 
@@ -746,19 +801,17 @@ function duplicateToNextWeek(dateStr, courseId) {
     curDate.setDate(curDate.getDate() + 7);
     const nextDateStr = curDate.toISOString().split('T')[0];
 
-    const conflictMsg = checkConflict(nextDateStr, course.time, course.teacher, course.loc, course.campus);
-    if (conflictMsg && !confirm(`${conflictMsg}\n复制后将呈红框冲突高亮，是否依然复制？`)) return;
-
     if (!coursesData[nextDateStr]) coursesData[nextDateStr] = [];
     const newCourse = JSON.parse(JSON.stringify(course));
     newCourse.id = Date.now().toString();
     coursesData[nextDateStr].push(newCourse);
 
-    saveData(); renderCalendar();
-    alert(`🎉 已成功将该课程复制排入下周 (${nextDateStr})！`);
+    await saveDataToCloud();
+    renderCalendar();
+    alert(`🎉 已成功复制排入下周 (${nextDateStr}) 并同步到云端！`);
 }
 
-function cycleTrialStatus(dateStr, courseId, e) {
+async function cycleTrialStatus(dateStr, courseId, e) {
     e.stopPropagation();
     const course = (coursesData[dateStr] || []).find(c => c.id === courseId);
     if (!course || !course.trialStatus) return;
@@ -767,7 +820,8 @@ function cycleTrialStatus(dateStr, courseId, e) {
     let nextIdx = (statuses.indexOf(course.trialStatus) + 1) % statuses.length;
     course.trialStatus = statuses[nextIdx];
 
-    saveData(); renderCalendar();
+    await saveDataToCloud();
+    renderCalendar();
 }
 
 // ==================== 视图与日历渲染 ====================
@@ -828,7 +882,7 @@ function renderCalendar() {
         header.appendChild(restBtn);
         cell.appendChild(header);
 
-        // 计算当天所有冲突课程 ID 集
+        // 精确获取当天冲突 ID 集
         const conflictIdsOnDay = getConflictCourseIdsOnDay(dateStr);
 
         let dayCourses = (coursesData[dateStr] || []).filter(c => {
@@ -857,7 +911,6 @@ function renderCalendar() {
                 statusBadgeHtml = `<span class="trial-status-badge ${sClass}" onclick="cycleTrialStatus('${dateStr}', '${c.id}', event)">📌 ${c.trialStatus} (点击切换)</span>`;
             }
 
-            // 冲突警示标红 Banner
             let conflictBanner = isConflict ? `<div class="conflict-badge">🚨 时间/场地冲突警示</div>` : "";
 
             card.innerHTML = `
@@ -985,7 +1038,7 @@ function exportData() {
         }
     }
 
-    const backupObj = { version: "2026.8", campuses, teacherList, classList, locationList, timeSlotList, coursesData: filteredCourses, eventsData, courseColors, restDays };
+    const backupObj = { version: "2026.cloud", campuses, teacherList, classList, locationList, timeSlotList, coursesData: filteredCourses, eventsData, courseColors, restDays };
     const downloadAnchor = document.createElement("a");
     downloadAnchor.setAttribute("href", "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backupObj, null, 2)));
     downloadAnchor.setAttribute("download", `课程表备份_${currentUser.username}_${currentYear}年${currentMonth}月.json`);
@@ -993,10 +1046,10 @@ function exportData() {
 }
 
 function triggerImport() { document.getElementById("importInput").click(); }
-function importData(event) {
+async function importData(event) {
     const file = event.target.files[0]; if (!file) return;
     const reader = new FileReader();
-    reader.onload = function(e) {
+    reader.onload = async function(e) {
         try {
             const imported = JSON.parse(e.target.result);
             if (imported.coursesData) {
@@ -1005,19 +1058,25 @@ function importData(event) {
                 locationList = imported.locationList || defaultLocations; timeSlotList = imported.timeSlotList || defaultTimeSlots;
                 courseColors = imported.courseColors || defaultColors; restDays = imported.restDays || {};
                 campuses = imported.campuses || defaultCampuses;
-                saveData(); updateSelectDropdowns(); renderCalendar(); alert("🎉 导入成功！");
+                
+                await saveDataToCloud();
+                updateSelectDropdowns(); renderCalendar(); alert("🎉 导入成功并已同步至 Supabase 云端！");
             }
         } catch (err) { alert("⚠️ 导入失败！"); }
     };
     reader.readAsText(file);
 }
 
-function toggleRestDay(dateStr) { if (restDays[dateStr]) delete restDays[dateStr]; else restDays[dateStr] = true; saveData(); renderCalendar(); }
+async function toggleRestDay(dateStr) {
+    if (restDays[dateStr]) delete restDays[dateStr]; else restDays[dateStr] = true;
+    await saveDataToCloud(); renderCalendar();
+}
+
 function getOrAssignColor(courseName) {
     if (courseColors[courseName]) return courseColors[courseName];
     const hue = Math.floor(Math.random() * 360);
     const newColor = `hsl(${hue}, 65%, 42%)`;
-    courseColors[courseName] = newColor; saveData(); return newColor;
+    courseColors[courseName] = newColor; return newColor;
 }
 
 function openCourseModal(dateStr = "", courseId = null) {
@@ -1044,11 +1103,11 @@ function openCourseModal(dateStr = "", courseId = null) {
 }
 
 function editCourse(dateStr, courseId) { openCourseModal(dateStr, courseId); }
-function deleteCourse(dateStr, courseId) {
+async function deleteCourse(dateStr, courseId) {
     if (confirm("确定删除这节课程吗？")) {
         coursesData[dateStr] = coursesData[dateStr].filter(c => c.id !== courseId);
         if (coursesData[dateStr].length === 0) delete coursesData[dateStr];
-        saveData(); renderCalendar();
+        await saveDataToCloud(); renderCalendar();
     }
 }
 
@@ -1098,14 +1157,15 @@ function openBatchRestModal() {
     });
     document.getElementById("batchRestModal").style.display = "flex";
 }
-function saveBatchRestDays() {
+async function saveBatchRestDays() {
     if (selectedRestDays.length === 0) return alert("请在日历中勾选日期！");
     selectedRestDays.forEach(d => { restDays[`${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(d).padStart(2, '0')}`] = true; });
-    saveData(); closeModal("batchRestModal"); renderCalendar();
+    closeModal("batchRestModal");
+    await saveDataToCloud(); renderCalendar();
 }
 
-function changeYear(val) { currentYear = parseInt(val); saveData(); renderCalendar(); }
-function changeCampus(val) { currentCampus = val; saveData(); renderCalendar(); }
+function changeYear(val) { currentYear = parseInt(val); renderCalendar(); }
+function changeCampus(val) { currentCampus = val; renderCalendar(); }
 function changeTeacherFilter(val) { currentTeacherFilter = val; renderCalendar(); }
 
 function openCampusManageModal() { document.getElementById("newCampusName").value = ""; renderCampusManageList(); document.getElementById("campusManageModal").style.display = "flex"; }
@@ -1117,8 +1177,19 @@ function renderCampusManageList() {
         container.appendChild(row);
     });
 }
-function saveNewCampus() { const name = document.getElementById("newCampusName").value.trim(); if (name && !campuses.includes(name)) { campuses.push(name); currentCampus = name; saveData(); renderCampusManageList(); renderCampusSelects(); renderCalendar(); } }
-function deleteCampus(index) { if (confirm("确定要删除该校区吗？")) { campuses.splice(index, 1); currentCampus = campuses[0]; saveData(); renderCampusManageList(); renderCampusSelects(); renderCalendar(); } }
+async function saveNewCampus() {
+    const name = document.getElementById("newCampusName").value.trim();
+    if (name && !campuses.includes(name)) {
+        campuses.push(name); currentCampus = name;
+        await saveDataToCloud(); renderCampusManageList(); renderCampusSelects(); renderCalendar();
+    }
+}
+async function deleteCampus(index) {
+    if (confirm("确定要删除该校区吗？")) {
+        campuses.splice(index, 1); currentCampus = campuses[0];
+        await saveDataToCloud(); renderCampusManageList(); renderCampusSelects(); renderCalendar();
+    }
+}
 
 function openConfigModal() { switchConfigTab('teachers'); document.getElementById("configModal").style.display = "flex"; }
 let activeConfigTab = "teachers";
@@ -1138,22 +1209,22 @@ function renderConfigList() {
     html += `</div>`;
     container.innerHTML = html;
 }
-function addConfigItem() {
+async function addConfigItem() {
     const val = document.getElementById("newConfigInput").value.trim();
     if (!val) return;
     if (activeConfigTab === "teachers" && !teacherList.includes(val)) teacherList.push(val);
     else if (activeConfigTab === "classes" && !classList.includes(val)) classList.push(val);
     else if (activeConfigTab === "locs" && !locationList.includes(val)) locationList.push(val);
     else if (activeConfigTab === "times" && !timeSlotList.includes(val)) timeSlotList.push(val);
-    saveData(); renderConfigList();
+    await saveDataToCloud(); renderConfigList();
 }
-function deleteConfigItem(index) {
+async function deleteConfigItem(index) {
     if (confirm("确定要删除吗？")) {
         if (activeConfigTab === "teachers") teacherList.splice(index, 1);
         else if (activeConfigTab === "classes") classList.splice(index, 1);
         else if (activeConfigTab === "locs") locationList.splice(index, 1);
         else if (activeConfigTab === "times") timeSlotList.splice(index, 1);
-        saveData(); renderConfigList();
+        await saveDataToCloud(); renderConfigList();
     }
 }
 
@@ -1166,7 +1237,7 @@ function openEventModal(dateStr = "") {
     document.getElementById("fieldEventDetail").value = "";
     document.getElementById("eventModal").style.display = "flex";
 }
-function saveEvent() {
+async function saveEvent() {
     const editId = document.getElementById("editEventId").value;
     const campus = document.getElementById("fieldEventCampus").value;
     const dateStr = document.getElementById("fieldEventDate").value;
@@ -1184,7 +1255,8 @@ function saveEvent() {
         eventsData[dateStr].push({ id: Date.now().toString(), campus, title, hours, detail });
     }
 
-    saveData(); closeModal("eventModal"); closeModal("dayEventsModal"); renderCalendar();
+    closeModal("eventModal"); closeModal("dayEventsModal");
+    await saveDataToCloud(); renderCalendar();
 }
 
 function openDayEventsModal(dateStr) {
@@ -1202,11 +1274,11 @@ function openDayEventsModal(dateStr) {
     document.getElementById("btnAddMoreEvent").onclick = () => { closeModal("dayEventsModal"); openEventModal(dateStr); };
     document.getElementById("dayEventsModal").style.display = "flex";
 }
-function deleteEvent(dateStr, eventId) {
+async function deleteEvent(dateStr, eventId) {
     if (confirm("确定删除吗？")) {
         eventsData[dateStr] = eventsData[dateStr].filter(e => e.id !== eventId);
         if (eventsData[dateStr].length === 0) delete eventsData[dateStr];
-        saveData(); openDayEventsModal(dateStr); renderCalendar();
+        await saveDataToCloud(); openDayEventsModal(dateStr); renderCalendar();
     }
 }
 
@@ -1221,7 +1293,7 @@ function openColorModal() {
     document.getElementById("colorModal").style.display = "flex";
 }
 function colorToHex(colorStr) { return colorStr.startsWith("#") ? colorStr : "#2563eb"; }
-function updateColor(name, hex) { courseColors[name] = hex; saveData(); }
+async function updateColor(name, hex) { courseColors[name] = hex; await saveDataToCloud(); }
 function closeModal(id) { document.getElementById(id).style.display = "none"; }
 
 function initMonthPicker() {
@@ -1230,7 +1302,7 @@ function initMonthPicker() {
         const btn = document.createElement("button");
         btn.className = `month-btn ${m === currentMonth ? 'active' : ''}`;
         btn.innerText = `${m}月`;
-        btn.onclick = () => { currentMonth = m; saveData(); renderCalendar(); initMonthPicker(); };
+        btn.onclick = () => { currentMonth = m; renderCalendar(); initMonthPicker(); };
         container.appendChild(btn);
     }
 }
@@ -1242,7 +1314,6 @@ function initControls() {
         if (y === currentYear) opt.selected = true;
         yearSelect.appendChild(opt);
     }
-    updateSelectDropdowns();
     initMonthPicker();
     checkAuthUI();
 }
