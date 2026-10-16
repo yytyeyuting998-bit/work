@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智能机构多校区课程表与排班系统 (严格授权审核版)</title>
+    <title>智能机构多校区课程表与排班系统 (管理员强保护版)</title>
     <!-- 引入 Supabase JS SDK -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
@@ -198,7 +198,7 @@
 
             <button class="btn btn-backup admin-only" onclick="openCampusManageModal()">🏫 校区</button>
 
-            <!-- 🔔 包含实时红点气泡提醒的审核按钮 -->
+            <!-- 🔔 包含实时红点角标提醒的审核按钮 -->
             <button class="btn btn-config admin-only" onclick="openUserAdminModal()">
                 👥 审核
                 <span class="badge-notice" id="noticeBadge">0</span>
@@ -404,7 +404,6 @@ const ADMIN_PASS = "117955yyt";
 let users = [];
 let currentUser = JSON.parse(localStorage.getItem("system_current_user")) || null;
 
-// 初始仅包含叶钰婷老师
 const defaultTeachers = ["叶钰婷"];
 const defaultClasses = ["科创1V4", "司武AI", "试听课 - C++", "试听课 - 科创", "试听课 - 科特"];
 const defaultLocations = ["银聚祥邸", "集美软三", "线上"];
@@ -432,15 +431,21 @@ let currentViewMode = "month";
 let selectedBatchDays = [];
 let selectedRestDays = [];
 
+// 🔒 绝对保护管理员账号：每次初始化强行注入/修正叶钰婷管理员账号
 async function loadUsersFromCloud() {
     try {
         const { data, error } = await supabaseClient.from('system_users').select('*');
-        if (error || !data || data.length === 0) {
-            const initUser = { username: ADMIN_USER, password: ADMIN_PASS, teacherName: "叶钰婷", status: "approved", role: "admin" };
-            await supabaseClient.from('system_users').insert([initUser]);
-            users = [initUser];
-        } else {
+        let adminExist = false;
+        if (data && data.length > 0) {
             users = data;
+            adminExist = users.some(u => u.username === ADMIN_USER);
+        }
+        
+        // 如果管理员账号不存，自动创建补全
+        if (!adminExist) {
+            const adminUser = { username: ADMIN_USER, password: ADMIN_PASS, teacherName: "叶钰婷", status: "approved", role: "admin" };
+            await supabaseClient.from('system_users').upsert([adminUser]);
+            users.push(adminUser);
         }
     } catch (e) {
         users = [{ username: ADMIN_USER, password: ADMIN_PASS, teacherName: "叶钰婷", status: "approved", role: "admin" }];
@@ -454,7 +459,7 @@ function switchAuthTab(tab) {
     document.getElementById("formLogin").style.display = tab === 'login' ? 'block' : 'none';
     document.getElementById("formRegister").style.display = tab === 'register' ? 'block' : 'none';
     
-    // 渲染注册选择下拉框 (只允许选择教师库中拥有的老师)
+    // 渲染注册选择下拉框 (只允许选择教师库中创建好的老师)
     const regSelect = document.getElementById("regTeacherBind");
     regSelect.innerHTML = "";
     teacherList.forEach(t => {
@@ -480,7 +485,6 @@ async function handleLogin() {
     checkAuthUI();
 }
 
-// 🔐 严谨注册逻辑：必须严格在教师库中存在才能注册
 async function handleRegister() {
     const selectedTeacher = document.getElementById("regTeacherBind").value;
     const inputUser = document.getElementById("regUser").value.trim();
@@ -537,7 +541,6 @@ function checkAuthUI() {
     loadDataFromCloud();
 }
 
-// 🔔 审核消息强提醒气泡更新
 function updatePendingBadge() {
     const pendingList = users.filter(u => u.status === "pending");
     const badge = document.getElementById("noticeBadge");
@@ -823,4 +826,526 @@ async function duplicateToNextWeek(dateStr, courseId) {
     const course = (coursesData[dateStr] || []).find(c => c.id === courseId);
     if (!course) return;
 
-    const curDate = new Date(dateStr
+    const curDate = new Date(dateStr);
+    curDate.setDate(curDate.getDate() + 7);
+    const nextDateStr = curDate.toISOString().split('T')[0];
+
+    if (!coursesData[nextDateStr]) coursesData[nextDateStr] = [];
+    const newCourse = JSON.parse(JSON.stringify(course));
+    newCourse.id = Date.now().toString();
+    coursesData[nextDateStr].push(newCourse);
+
+    await saveDataToCloud();
+    renderCalendar();
+    alert(`🎉 已成功复制排入下周 (${nextDateStr}) 并同步到云端！`);
+}
+
+async function cycleTrialStatus(dateStr, courseId, e) {
+    e.stopPropagation();
+    const course = (coursesData[dateStr] || []).find(c => c.id === courseId);
+    if (!course || !course.trialStatus) return;
+
+    const statuses = ["待试听", "已试听", "已报名", "未转化"];
+    let nextIdx = (statuses.indexOf(course.trialStatus) + 1) % statuses.length;
+    course.trialStatus = statuses[nextIdx];
+
+    await saveDataToCloud();
+    renderCalendar();
+}
+
+function switchView(mode) {
+    currentViewMode = mode;
+    document.getElementById("btnViewMonth").style.opacity = mode === 'month' ? '1' : '0.6';
+    document.getElementById("btnViewWeek").style.opacity = mode === 'week' ? '1' : '0.6';
+    renderCalendar();
+}
+
+function renderCalendar() {
+    if (!currentUser) return;
+
+    document.getElementById("calendarTitle").innerText = `${currentYear}年${currentMonth}月 课程安排`;
+    document.getElementById("summaryMonthText").innerText = `${currentMonth}月`;
+    document.getElementById("summaryCampusText").innerText = currentCampus === "ALL" ? "全部校区" : currentCampus;
+
+    const grid = document.getElementById("calendarGrid"); grid.innerHTML = "";
+    const weekDays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+    weekDays.forEach(day => { const h = document.createElement("div"); h.className = "week-header"; h.innerText = day; grid.appendChild(h); });
+
+    const firstDay = new Date(currentYear, currentMonth - 1, 1);
+    let startDay = firstDay.getDay(); startDay = startDay === 0 ? 6 : startDay - 1;
+    const totalDays = new Date(currentYear, currentMonth, 0).getDate();
+
+    for (let i = 0; i < startDay; i++) grid.appendChild(Object.assign(document.createElement("div"), { className: "day-cell other-month" }));
+
+    const monthlyCourseStats = {};
+    let totalEventHours = 0, totalRestDaysCount = 0, totalCompensatoryHours = 0;
+
+    const targetTeacher = currentUser.role === "admin" ? currentTeacherFilter : currentUser.teacherName;
+
+    for (let d = 1; d <= totalDays; d++) {
+        const dateStr = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+        const isRest = !!restDays[dateStr];
+        if (isRest) totalRestDaysCount++;
+
+        const cell = document.createElement("div");
+        cell.className = `day-cell ${isRest ? 'rest-day' : ''}`;
+
+        const header = document.createElement("div"); header.className = "day-header";
+        const titleSpan = document.createElement("span"); titleSpan.className = "date-title"; titleSpan.innerText = `${currentMonth}月${d}日`;
+        titleSpan.onclick = () => toggleRestDay(dateStr);
+        header.appendChild(titleSpan);
+
+        let dayEvents = (eventsData[dateStr] || []).filter(e => currentCampus === "ALL" || e.campus === currentCampus);
+        if (dayEvents.length > 0) {
+            let eventHoursCount = dayEvents.reduce((acc, curr) => acc + (parseFloat(curr.hours) || 0), 0);
+            totalEventHours += eventHoursCount;
+            const starTag = document.createElement("span"); starTag.className = "event-star-badge"; starTag.innerHTML = `⭐ ${dayEvents.length}`;
+            starTag.onclick = (e) => { e.stopPropagation(); openDayEventsModal(dateStr); };
+            header.appendChild(starTag);
+        }
+
+        const restBtn = document.createElement("span"); restBtn.className = `rest-tag-btn ${isRest ? 'is-rest' : 'not-rest'}`;
+        restBtn.innerText = isRest ? "🏖️ 休息" : "＋休息";
+        restBtn.onclick = (e) => { e.stopPropagation(); toggleRestDay(dateStr); };
+        header.appendChild(restBtn);
+        cell.appendChild(header);
+
+        const conflictIdsOnDay = getConflictCourseIdsOnDay(dateStr);
+
+        let dayCourses = (coursesData[dateStr] || []).filter(c => {
+            const matchCampus = (currentCampus === "ALL" || !c.campus || c.campus === currentCampus);
+            const matchTeacher = (targetTeacher === "ALL" || c.teacher === targetTeacher);
+            return matchCampus && matchTeacher;
+        });
+
+        dayCourses.sort((a, b) => parseMinutes(a.time).start - parseMinutes(b.time).start);
+
+        let dayCourseHoursTotal = 0;
+        dayCourses.forEach(c => {
+            const h = parseFloat(c.hours || 0);
+            monthlyCourseStats[c.name] = (monthlyCourseStats[c.name] || 0) + h;
+            dayCourseHoursTotal += h;
+
+            const isConflict = conflictIdsOnDay.has(c.id);
+
+            const card = document.createElement("div");
+            card.className = `course-card ${isConflict ? 'has-conflict' : ''}`;
+            card.style.backgroundColor = getOrAssignColor(c.name);
+
+            let statusBadgeHtml = "";
+            if (c.trialStatus) {
+                let sClass = c.trialStatus === "待试听" ? "status-wait" : c.trialStatus === "已试听" ? "status-done" : c.trialStatus === "已报名" ? "status-signed" : "status-failed";
+                statusBadgeHtml = `<span class="trial-status-badge ${sClass}" onclick="cycleTrialStatus('${dateStr}', '${c.id}', event)">📌 ${c.trialStatus} (点击切换)</span>`;
+            }
+
+            let conflictBanner = isConflict ? `<div class="conflict-badge">🚨 时间/场地冲突警示</div>` : "";
+
+            card.innerHTML = `
+                <div class="card-actions">
+                    <button class="card-btn" title="顺延复制到下周" onclick="duplicateToNextWeek('${dateStr}', '${c.id}')">🔁</button>
+                    <button class="card-btn" onclick="editCourse('${dateStr}', '${c.id}')">✏️</button>
+                    <button class="card-btn" onclick="deleteCourse('${dateStr}', '${c.id}')">🗑️</button>
+                </div>
+                <div><b>${c.time || '全天'}</b> (${c.hours}h)</div>
+                <div><b>${c.detailName || c.name}</b></div>
+                <div style="font-size:10px;opacity:0.9;">👨‍🏫 ${c.teacher || '叶钰婷'} | 📍 ${c.loc || ''}</div>
+                ${statusBadgeHtml}
+                ${conflictBanner}
+            `;
+            cell.appendChild(card);
+        });
+
+        if (isRest && dayCourseHoursTotal > 0) totalCompensatoryHours += dayCourseHoursTotal;
+
+        const addBtn = document.createElement("button"); addBtn.className = "btn-add-day"; addBtn.innerText = "+ 添加";
+        addBtn.onclick = () => openCourseModal(dateStr);
+        cell.appendChild(addBtn);
+
+        grid.appendChild(cell);
+    }
+
+    renderSummary(monthlyCourseStats, totalEventHours, totalRestDaysCount, totalCompensatoryHours);
+}
+
+function renderSummary(courseStats, totalEventHours, restDaysCount, tiaoxiuHours) {
+    const rowCourses = document.getElementById("summaryRowCourses");
+    const rowFinancial = document.getElementById("summaryRowFinancial");
+    rowCourses.innerHTML = ""; rowFinancial.innerHTML = "";
+
+    const names = Object.keys(courseStats);
+    let grandTotalHours = 0; names.forEach(name => grandTotalHours += courseStats[name]);
+
+    const totalTag = document.createElement("div"); totalTag.className = "summary-tag-total";
+    totalTag.innerHTML = `📌 教学总课时: <span>${grandTotalHours}</span> 课时`;
+    rowCourses.appendChild(totalTag);
+
+    names.forEach(name => {
+        const tag = document.createElement("div"); tag.className = "summary-tag";
+        const color = getOrAssignColor(name);
+        tag.innerHTML = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color}"></span>${name}: <span class="hours">${courseStats[name]}</span> 课时`;
+        rowCourses.appendChild(tag);
+    });
+
+    if (totalEventHours > 0) {
+        const eventTag = document.createElement("div"); eventTag.className = "summary-tag-event";
+        eventTag.innerHTML = `⭐ 非课程事务: <span>${totalEventHours}</span> 小时`;
+        rowFinancial.appendChild(eventTag);
+    }
+
+    const restTag = document.createElement("div"); restTag.className = "summary-tag-rest";
+    restTag.innerHTML = `🏖️ 休息天数: <span>${restDaysCount}</span> 天`;
+    rowFinancial.appendChild(restTag);
+
+    if (tiaoxiuHours > 0) {
+        const tiaoxiuTag = document.createElement("div"); tiaoxiuTag.className = "summary-tag-tiaoxiu";
+        tiaoxiuTag.innerHTML = `⏰ 可调休时间: <span>${tiaoxiuHours}</span> 小时`;
+        rowFinancial.appendChild(tiaoxiuTag);
+    }
+}
+
+function openReportModal() {
+    const container = document.getElementById("reportContent"); container.innerHTML = "";
+    const totalDays = new Date(currentYear, currentMonth, 0).getDate();
+    let courseStats = {}, totalCourseHours = 0, eventList = [], totalEventHours = 0;
+    let trialTotal = 0, trialSigned = 0;
+
+    const targetTeacher = currentUser.role === "admin" ? currentTeacherFilter : currentUser.teacherName;
+
+    for (let d = 1; d <= totalDays; d++) {
+        const dateStr = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+        let dayCourses = (coursesData[dateStr] || []).filter(c => {
+            return (currentCampus === "ALL" || !c.campus || c.campus === currentCampus) && (targetTeacher === "ALL" || c.teacher === targetTeacher);
+        });
+
+        dayCourses.forEach(c => {
+            const h = parseFloat(c.hours || 0);
+            courseStats[c.detailName || c.name] = (courseStats[c.detailName || c.name] || 0) + h;
+            totalCourseHours += h;
+
+            if (c.name.includes("试听课")) {
+                trialTotal++;
+                if (c.trialStatus === "已报名") trialSigned++;
+            }
+        });
+
+        let dayEvents = (eventsData[dateStr] || []).filter(e => currentCampus === "ALL" || e.campus === currentCampus);
+        dayEvents.forEach(e => { const h = parseFloat(e.hours || 0); eventList.push({ date: dateStr, title: e.title, hours: h, campus: e.campus, detail: e.detail }); totalEventHours += h; });
+    }
+
+    const conversionRate = trialTotal > 0 ? ((trialSigned / trialTotal) * 100).toFixed(1) : 0;
+
+    let html = `
+        <div style="background:#f8fafc; padding:12px; border-radius:6px; margin-bottom:12px; font-size:12px; line-height:1.6;">
+            <div><b>统计范围：</b> ${currentYear}年${currentMonth}月 (${currentCampus === "ALL" ? "全部校区" : currentCampus} | ${targetTeacher === "ALL" ? "全员" : targetTeacher})</div>
+            <div><b>教学总课时：</b> <span style="color:#2563eb;font-weight:bold;">${totalCourseHours}</span> 课时</div>
+            <div><b>🎯 试听课转化分析：</b> 本月试听学员 <span style="color:#d97706;font-weight:bold;">${trialTotal}</span> 人，成功报名 <span style="color:#166534;font-weight:bold;">${trialSigned}</span> 人，转化率 <span style="color:#2563eb;font-weight:bold;">${conversionRate}%</span></div>
+            <div><b>非课程事务时长：</b> <span style="color:#ca8a04;font-weight:bold;">${totalEventHours}</span> 小时</div>
+        </div>
+        <div style="font-weight:bold;margin:10px 0 5px 0;">📚 教学上课汇总：</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;" border="1">
+            <tr style="background:#f1f5f9;"><th>班级 / 试听学员</th><th>总课时</th></tr>
+    `;
+    for (let name in courseStats) html += `<tr><td>${name}</td><td><b>${courseStats[name]}</b> 课时</td></tr>`;
+    html += `</table><div style="font-weight:bold;margin:10px 0 5px 0;">⭐ 非课程事务明细：</div><table style="width:100%;border-collapse:collapse;font-size:12px;" border="1"><tr style="background:#f1f5f9;"><th>日期</th><th>事务</th><th>时长</th><th>备注</th></tr>`;
+    eventList.forEach(i => html += `<tr><td>${i.date}</td><td>${i.title}</td><td>${i.hours}h</td><td>${i.detail || '-'}</td></tr>`);
+    html += `</table>`;
+
+    container.innerHTML = html;
+    document.getElementById("reportModal").style.display = "flex";
+}
+
+function exportData() {
+    let filteredCourses = coursesData;
+    if (currentUser.role !== "admin") {
+        filteredCourses = {};
+        for (let d in coursesData) {
+            let myCourses = coursesData[d].filter(c => c.teacher === currentUser.teacherName);
+            if (myCourses.length > 0) filteredCourses[d] = myCourses;
+        }
+    }
+
+    const backupObj = { version: "2026.cloud", campuses, teacherList, classList, locationList, timeSlotList, coursesData: filteredCourses, eventsData, courseColors, restDays };
+    const downloadAnchor = document.createElement("a");
+    downloadAnchor.setAttribute("href", "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backupObj, null, 2)));
+    downloadAnchor.setAttribute("download", `课程表备份_${currentUser.username}_${currentYear}年${currentMonth}月.json`);
+    document.body.appendChild(downloadAnchor); downloadAnchor.click(); downloadAnchor.remove();
+}
+
+function triggerImport() { document.getElementById("importInput").click(); }
+async function importData(event) {
+    const file = event.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async function(e) {
+        try {
+            const imported = JSON.parse(e.target.result);
+            if (imported.coursesData) {
+                coursesData = imported.coursesData; eventsData = imported.eventsData || {};
+                teacherList = imported.teacherList || defaultTeachers; classList = imported.classList || defaultClasses;
+                locationList = imported.locationList || defaultLocations; timeSlotList = imported.timeSlotList || defaultTimeSlots;
+                courseColors = imported.courseColors || defaultColors; restDays = imported.restDays || {};
+                campuses = imported.campuses || defaultCampuses;
+                
+                await saveDataToCloud();
+                updateSelectDropdowns(); renderCalendar(); alert("🎉 导入成功并已同步至 Supabase 云端！");
+            }
+        } catch (err) { alert("⚠️ 导入失败！"); }
+    };
+    reader.readAsText(file);
+}
+
+async function toggleRestDay(dateStr) {
+    if (restDays[dateStr]) delete restDays[dateStr]; else restDays[dateStr] = true;
+    await saveDataToCloud(); renderCalendar();
+}
+
+function getOrAssignColor(courseName) {
+    if (courseColors[courseName]) return courseColors[courseName];
+    const hue = Math.floor(Math.random() * 360);
+    const newColor = `hsl(${hue}, 65%, 42%)`;
+    courseColors[courseName] = newColor; return newColor;
+}
+
+function openCourseModal(dateStr = "", courseId = null) {
+    document.getElementById("editCourseId").value = courseId || "";
+    document.getElementById("fieldCourseCampus").value = currentCampus === "ALL" ? campuses[0] : currentCampus;
+    document.getElementById("fieldSingleStudentName").value = "";
+
+    if (courseId && dateStr) {
+        const course = coursesData[dateStr].find(c => c.id === courseId);
+        document.getElementById("fieldDate").value = dateStr;
+        document.getElementById("fieldTeacher").value = course.teacher || "叶钰婷";
+        document.getElementById("fieldName").value = course.name;
+        document.getElementById("fieldSingleStudentName").value = course.studentName || "";
+        document.getElementById("fieldTime").value = course.time;
+        document.getElementById("fieldHours").value = course.hours;
+        document.getElementById("fieldLoc").value = course.loc;
+    } else {
+        document.getElementById("fieldDate").value = dateStr || `${currentYear}-${String(currentMonth).padStart(2, '0')}-01`;
+        document.getElementById("fieldTeacher").value = "叶钰婷";
+        document.getElementById("fieldHours").value = "2";
+    }
+    toggleStudentField('single');
+    document.getElementById("courseModal").style.display = "flex";
+}
+
+function editCourse(dateStr, courseId) { openCourseModal(dateStr, courseId); }
+async function deleteCourse(dateStr, courseId) {
+    if (confirm("确定删除这节课程吗？")) {
+        coursesData[dateStr] = coursesData[dateStr].filter(c => c.id !== courseId);
+        if (coursesData[dateStr].length === 0) delete coursesData[dateStr];
+        await saveDataToCloud(); renderCalendar();
+    }
+}
+
+function openBatchCourseModal() {
+    selectedBatchDays = [];
+    document.getElementById("fieldBatchCampus").value = currentCampus === "ALL" ? campuses[0] : currentCampus;
+    document.getElementById("fieldBatchTeacher").value = "叶钰婷";
+    document.getElementById("fieldBatchStudentName").value = "";
+    toggleStudentField('batch');
+
+    renderCalendarPickerGrid("batchCalendarGrid", selectedBatchDays, (d, el) => {
+        if (selectedBatchDays.includes(d)) { selectedBatchDays = selectedBatchDays.filter(day => day !== d); el.classList.remove("checked"); }
+        else { selectedBatchDays.push(d); el.classList.add("checked"); }
+    });
+    document.getElementById("batchCourseModal").style.display = "flex";
+}
+
+function renderCalendarPickerGrid(containerId, selectedArray, toggleCallback) {
+    const container = document.getElementById(containerId); container.innerHTML = "";
+    const weekDays = ["一", "二", "三", "四", "五", "六", "日"];
+    weekDays.forEach(w => { const h = document.createElement("div"); h.className = "picker-week-head"; h.innerText = w; container.appendChild(h); });
+
+    const firstDay = new Date(currentYear, currentMonth - 1, 1);
+    let startDay = firstDay.getDay(); startDay = startDay === 0 ? 6 : startDay - 1;
+    const totalDays = new Date(currentYear, currentMonth, 0).getDate();
+
+    for (let i = 0; i < startDay; i++) container.appendChild(Object.assign(document.createElement("div"), { className: "picker-day-item empty" }));
+
+    for (let d = 1; d <= totalDays; d++) {
+        const dayObj = new Date(currentYear, currentMonth - 1, d);
+        const dayOfWeek = dayObj.getDay();
+        const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6);
+
+        const item = document.createElement("div");
+        item.className = `picker-day-item ${isWeekend ? 'weekend' : ''} ${selectedArray.includes(d) ? 'checked' : ''}`;
+        item.innerText = `${d}号`;
+        item.onclick = () => toggleCallback(d, item);
+        container.appendChild(item);
+    }
+}
+
+function openBatchRestModal() {
+    selectedRestDays = [];
+    renderCalendarPickerGrid("restCalendarGrid", selectedRestDays, (d, el) => {
+        if (selectedRestDays.includes(d)) { selectedRestDays = selectedRestDays.filter(day => day !== d); el.classList.remove("checked"); }
+        else { selectedRestDays.push(d); el.classList.add("checked"); }
+    });
+    document.getElementById("batchRestModal").style.display = "flex";
+}
+async function saveBatchRestDays() {
+    if (selectedRestDays.length === 0) return alert("请在日历中勾选日期！");
+    selectedRestDays.forEach(d => { restDays[`${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(d).padStart(2, '0')}`] = true; });
+    closeModal("batchRestModal");
+    await saveDataToCloud(); renderCalendar();
+}
+
+function changeYear(val) { currentYear = parseInt(val); renderCalendar(); }
+function changeCampus(val) { currentCampus = val; renderCalendar(); }
+function changeTeacherFilter(val) { currentTeacherFilter = val; renderCalendar(); }
+
+function openCampusManageModal() { document.getElementById("newCampusName").value = ""; renderCampusManageList(); document.getElementById("campusManageModal").style.display = "flex"; }
+function renderCampusManageList() {
+    const container = document.getElementById("campusManageList"); container.innerHTML = "";
+    campuses.forEach((c, index) => {
+        const row = document.createElement("div"); row.className = "config-list-item";
+        row.innerHTML = `<span>📍 ${c}</span>${campuses.length > 1 ? `<button class="card-btn" style="background:#ef4444;width:22px;height:22px;" onclick="deleteCampus(${index})">🗑️</button>` : `<span style="font-size:10px;color:#94a3b8;">默认校区</span>`}`;
+        container.appendChild(row);
+    });
+}
+async function saveNewCampus() {
+    const name = document.getElementById("newCampusName").value.trim();
+    if (name && !campuses.includes(name)) {
+        campuses.push(name); currentCampus = name;
+        await saveDataToCloud(); renderCampusManageList(); renderCampusSelects(); renderCalendar();
+    }
+}
+async function deleteCampus(index) {
+    if (confirm("确定要删除该校区吗？")) {
+        campuses.splice(index, 1); currentCampus = campuses[0];
+        await saveDataToCloud(); renderCampusManageList(); renderCampusSelects(); renderCalendar();
+    }
+}
+
+function openConfigModal() { switchConfigTab('teachers'); document.getElementById("configModal").style.display = "flex"; }
+let activeConfigTab = "teachers";
+function switchConfigTab(tab) { activeConfigTab = tab; renderConfigList(); }
+function renderConfigList() {
+    const container = document.getElementById("configTabContent");
+    let title = "", list = [];
+    if (activeConfigTab === "teachers") { title = "👨‍🏫 教师库"; list = teacherList; }
+    else if (activeConfigTab === "classes") { title = "📚 班级/试听库"; list = classList; }
+    else if (activeConfigTab === "locs") { title = "📍 教室地点"; list = locationList; }
+    else if (activeConfigTab === "times") { title = "⏰ 时间段"; list = timeSlotList; }
+
+    let html = `<div style="font-weight:bold; font-size:12px; margin-bottom:6px;">新增${title}：</div><div style="display:flex; gap:8px; margin-bottom:12px;"><input type="text" id="newConfigInput" placeholder="输入名称"><button class="btn btn-primary" onclick="addConfigItem()">添加</button></div><div style="max-height:200px; overflow-y:auto;">`;
+    list.forEach((item, index) => {
+        html += `<div class="config-list-item"><span>${item}</span>${item === '叶钰婷' ? `<span style="font-size:10px;color:#94a3b8;">系统管理员</span>` : `<button class="card-btn" style="background:#ef4444;width:22px;height:22px;" onclick="deleteConfigItem(${index})">🗑️</button>`}</div>`;
+    });
+    html += `</div>`;
+    container.innerHTML = html;
+}
+async function addConfigItem() {
+    const val = document.getElementById("newConfigInput").value.trim();
+    if (!val) return;
+    if (activeConfigTab === "teachers" && !teacherList.includes(val)) teacherList.push(val);
+    else if (activeConfigTab === "classes" && !classList.includes(val)) classList.push(val);
+    else if (activeConfigTab === "locs" && !locationList.includes(val)) locationList.push(val);
+    else if (activeConfigTab === "times" && !timeSlotList.includes(val)) timeSlotList.push(val);
+    await saveDataToCloud(); renderConfigList();
+}
+async function deleteConfigItem(index) {
+    if (confirm("确定要删除吗？")) {
+        if (activeConfigTab === "teachers") teacherList.splice(index, 1);
+        else if (activeConfigTab === "classes") classList.splice(index, 1);
+        else if (activeConfigTab === "locs") locationList.splice(index, 1);
+        else if (activeConfigTab === "times") timeSlotList.splice(index, 1);
+        await saveDataToCloud(); renderConfigList();
+    }
+}
+
+function openEventModal(dateStr = "") {
+    document.getElementById("editEventId").value = "";
+    document.getElementById("fieldEventDate").value = dateStr || `${currentYear}-${String(currentMonth).padStart(2, '0')}-01`;
+    document.getElementById("fieldEventCampus").value = currentCampus === "ALL" ? campuses[0] : currentCampus;
+    document.getElementById("fieldEventTitle").value = "";
+    document.getElementById("fieldEventHours").value = "1";
+    document.getElementById("fieldEventDetail").value = "";
+    document.getElementById("eventModal").style.display = "flex";
+}
+async function saveEvent() {
+    const editId = document.getElementById("editEventId").value;
+    const campus = document.getElementById("fieldEventCampus").value;
+    const dateStr = document.getElementById("fieldEventDate").value;
+    const title = document.getElementById("fieldEventTitle").value.trim();
+    const hours = parseFloat(document.getElementById("fieldEventHours").value) || 0;
+    const detail = document.getElementById("fieldEventDetail").value.trim();
+
+    if (!dateStr || !title) return alert("请填写完整！");
+    if (!eventsData[dateStr]) eventsData[dateStr] = [];
+
+    if (editId) {
+        const idx = eventsData[dateStr].findIndex(e => e.id === editId);
+        if (idx !== -1) eventsData[dateStr][idx] = { id: editId, campus, title, hours, detail };
+    } else {
+        eventsData[dateStr].push({ id: Date.now().toString(), campus, title, hours, detail });
+    }
+
+    closeModal("eventModal"); closeModal("dayEventsModal");
+    await saveDataToCloud(); renderCalendar();
+}
+
+function openDayEventsModal(dateStr) {
+    document.getElementById("dayEventsTitle").innerText = `⭐ ${dateStr} 事务明细`;
+    const listContainer = document.getElementById("dayEventsList"); listContainer.innerHTML = "";
+    let list = (eventsData[dateStr] || []).filter(e => currentCampus === "ALL" || e.campus === currentCampus);
+
+    list.forEach(e => {
+        const row = document.createElement("div");
+        row.style.cssText = "background:#fefce8; border:1px solid #fef08a; padding:8px; border-radius:6px; margin-bottom:6px; display:flex; justify-content:space-between;";
+        row.innerHTML = `<div><b>${e.title}</b> (${e.hours}h) <div style="font-size:11px;color:#a16207;">📍 ${e.campus} ${e.detail ? '| ' + e.detail : ''}</div></div><button class="card-btn" style="background:#ca8a04;width:22px;height:22px;" onclick="deleteEvent('${dateStr}', '${e.id}')">🗑️</button>`;
+        listContainer.appendChild(row);
+    });
+
+    document.getElementById("btnAddMoreEvent").onclick = () => { closeModal("dayEventsModal"); openEventModal(dateStr); };
+    document.getElementById("dayEventsModal").style.display = "flex";
+}
+async function deleteEvent(dateStr, eventId) {
+    if (confirm("确定删除吗？")) {
+        eventsData[dateStr] = eventsData[dateStr].filter(e => e.id !== eventId);
+        if (eventsData[dateStr].length === 0) delete eventsData[dateStr];
+        await saveDataToCloud(); openDayEventsModal(dateStr); renderCalendar();
+    }
+}
+
+function openColorModal() {
+    const container = document.getElementById("colorListContainer"); container.innerHTML = "";
+    classList.forEach(name => {
+        const color = getOrAssignColor(name);
+        const row = document.createElement("div"); row.style.cssText = "display:flex; justify-content:space-between; align-items:center; padding:5px 0;";
+        row.innerHTML = `<span>${name}</span><input type="color" value="${colorToHex(color)}" onchange="updateColor('${name}', this.value)" style="border:none;width:40px;height:24px;">`;
+        container.appendChild(row);
+    });
+    document.getElementById("colorModal").style.display = "flex";
+}
+function colorToHex(colorStr) { return colorStr.startsWith("#") ? colorStr : "#2563eb"; }
+async function updateColor(name, hex) { courseColors[name] = hex; await saveDataToCloud(); }
+function closeModal(id) { document.getElementById(id).style.display = "none"; }
+
+function initMonthPicker() {
+    const container = document.getElementById("monthPicker"); container.innerHTML = "";
+    for (let m = 1; m <= 12; m++) {
+        const btn = document.createElement("button");
+        btn.className = `month-btn ${m === currentMonth ? 'active' : ''}`;
+        btn.innerText = `${m}月`;
+        btn.onclick = () => { currentMonth = m; renderCalendar(); initMonthPicker(); };
+        container.appendChild(btn);
+    }
+}
+
+function initControls() {
+    const yearSelect = document.getElementById("yearSelect"); yearSelect.innerHTML = "";
+    for (let y = 2024; y <= 2030; y++) {
+        const opt = document.createElement("option"); opt.value = y; opt.innerText = `${y}年`;
+        if (y === currentYear) opt.selected = true;
+        yearSelect.appendChild(opt);
+    }
+    initMonthPicker();
+    checkAuthUI();
+}
+
+initControls();
+</script>
+
+</body>
+</html>
